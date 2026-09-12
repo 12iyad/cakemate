@@ -4,7 +4,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { extname, join } from "node:path";
 import { URL } from "node:url";
 import { getWebhookVerifyResponse } from "./bakerBot/channels.js";
-import { getSetupWelcome, processSetupMessage, resetSetupSession } from "./bakerBot/bakeryProfile.js";
+import { generateItemDescription, getSetupWelcome, processSetupMessage, resetSetupSession, saveOnboardingProfile } from "./bakerBot/bakeryProfile.js";
 import { handleDemoChat, resetDemoSession, sendDemoLeadEmail } from "./demoChat.js";
 
 const port = Number(process.env.PORT ?? 3000);
@@ -57,6 +57,16 @@ const server = createServer(async (request, response) => {
 
   if (request.method === "POST" && requestUrl.pathname === "/api/setup/reset") {
     await handleSetupResetRequest(request, response);
+    return;
+  }
+
+  if (request.method === "POST" && requestUrl.pathname === "/api/onboarding/save") {
+    await handleOnboardingSaveRequest(request, response);
+    return;
+  }
+
+  if (request.method === "POST" && requestUrl.pathname === "/api/onboarding/generate-description") {
+    await handleDescriptionRequest(request, response);
     return;
   }
 
@@ -184,6 +194,16 @@ async function handleSetupResetRequest(request: IncomingMessage, response: Serve
   } catch (error) {
     sendJson(response, 400, { error: error instanceof Error ? error.message : "Setup reset failed." });
   }
+}
+
+async function handleOnboardingSaveRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  try { sendJson(response, 200, { profile: await saveOnboardingProfile(await readJsonBody(request)) }); }
+  catch (error) { sendJson(response, 400, { error: error instanceof Error ? error.message : "Could not save onboarding." }); }
+}
+
+async function handleDescriptionRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  try { sendJson(response, 200, { description: await generateItemDescription(await readJsonBody(request)) }); }
+  catch (error) { sendJson(response, 400, { error: error instanceof Error ? error.message : "Could not generate a description." }); }
 }
 
 function handleWhatsAppVerification(requestUrl: URL, response: ServerResponse): void {

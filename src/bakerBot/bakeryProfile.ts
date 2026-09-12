@@ -5,11 +5,13 @@ export interface BakeryProfile {
   bakeryId: string;
   setupComplete: boolean;
   business: { bakerName?: string; name?: string; story?: string; location?: string; openingHours?: string };
-  products: { summary?: string; catalogue: string[]; pricingNotes?: string; customisationNotes?: string };
-  ordering: { orderMethod?: string; leadTime?: string; deposit?: string; collection?: boolean; delivery?: boolean; deliveryAreas?: string; paymentProcess?: string };
+  products: { summary?: string; catalogue: string[]; items: BakeryItem[]; pricingNotes?: string; customisationNotes?: string };
+  ordering: { orderMethod?: string; leadTime?: string; deposit?: string; collection?: boolean; delivery?: boolean; deliveryAreas?: string; paymentProcess?: string; paymentMethods: string[] };
   policies: { cancellations?: string; refunds?: string; allergens?: string; dietaryOptions?: string; escalationRules?: string };
   languageProfile: { warmth: "low" | "medium" | "high"; formality: "casual" | "balanced" | "professional"; replyLength: "short" | "medium" | "detailed"; emojiFrequency: "none" | "low" | "medium"; preferredPhrases: string[]; bannedPhrases: string[]; askOneQuestionAtATime: boolean };
 }
+
+export interface BakeryItem { name: string; variations?: string; price?: string; description?: string; }
 
 export interface SetupResponse { sessionId: string; bakeryId: string; profile: BakeryProfile; assistantMessage: string; progress: number; completedSteps: string[]; nextStep: string; }
 
@@ -69,6 +71,42 @@ export async function resetSetupSession(sessionId?: string, bakeryId?: string): 
   bakeryProfiles.set(id, createProfile(id));
   await saveProfiles();
   return getSetupWelcome(undefined, id);
+}
+
+export async function saveOnboardingProfile(input: unknown): Promise<BakeryProfile> {
+  if (!isRecord(input) || typeof input.bakeryId !== "string" || !input.bakeryId.trim()) {
+    throw new Error("A local bakery profile is required.");
+  }
+  const profile = await getBakeryProfile(input.bakeryId.trim());
+
+  if (Array.isArray(input.items)) {
+    profile.products.items = input.items.map(normaliseItem).filter((item): item is BakeryItem => Boolean(item)).slice(0, 50);
+    profile.products.catalogue = profile.products.items.map((item) => item.name);
+  }
+  if (Array.isArray(input.paymentMethods)) {
+    profile.ordering.paymentMethods = input.paymentMethods.filter((method): method is string => typeof method === "string" && method.trim().length > 0).map((method) => method.trim()).slice(0, 10);
+  }
+  if (isRecord(input.business)) patchStrings(profile.business, input.business, ["bakerName", "name", "location"]);
+  if (input.setupComplete === true) profile.setupComplete = profile.products.items.length > 0 && Boolean(profile.business.name);
+  bakeryProfiles.set(profile.bakeryId, profile);
+  await saveProfiles();
+  return profile;
+}
+
+export async function generateItemDescription(input: unknown): Promise<string> {
+  if (!isRecord(input) || typeof input.name !== "string" || !input.name.trim()) throw new Error("Add an item name first.");
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error("Missing OPENAI_API_KEY. Add it to .env before generating a description.");
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST", headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+    body: JSON.stringify({ model: process.env.OPENAI_MODEL ?? "gpt-4o-mini", temperature: 0.5, messages: [
+      { role: "system", content: "Write one factual, concise bakery-menu description. Do not use hype, emojis, unverifiable claims, or a price. Return only the description." },
+      { role: "user", content: JSON.stringify({ item: input.name, variations: readString(input.variations), price: readString(input.price) }) },
+    ] }),
+  });
+  const payload: unknown = await response.json();
+  if (!response.ok) throw new Error(readOpenAiError(payload));
+  return readOpenAiContent(payload).trim();
 }
 
 export function customerAgentContext(profile: BakeryProfile): string {
@@ -142,13 +180,14 @@ function patchStrings<T extends object>(target: T, source: unknown, keys: string
 function patchBooleans<T extends object>(target: T, source: unknown, keys: string[]): void { const record = target as Record<string, unknown>; if (isRecord(source)) for (const key of keys) if (typeof source[key] === "boolean") record[key] = source[key]; }
 function patchStringArray<T extends object>(target: T, source: unknown, key: string): void { const record = target as Record<string, unknown>; if (isRecord(source) && Array.isArray(source[key])) record[key] = source[key].filter((item): item is string => typeof item === "string" && item.trim().length > 0).slice(0, 20); }
 
-function hasEnoughContext(profile: BakeryProfile): boolean { return Boolean(profile.business.name && profile.products.catalogue.length > 0 && profile.ordering.orderMethod); }
+function hasEnoughContext(profile: BakeryProfile): boolean { return Boolean(profile.business.name && (profile.products.catalogue.length > 0 || profile.products.items.length > 0) && profile.ordering.orderMethod); }
 function responseFor(session: SetupSession, assistantMessage: string): SetupResponse { const completed = profileProgress(session.profile); return { sessionId: session.id, bakeryId: session.bakeryId, profile: session.profile, assistantMessage, progress: completed.length * 25, completedSteps: completed, nextStep: session.profile.setupComplete ? "complete" : "setup" }; }
 function profileProgress(profile: BakeryProfile): string[] { return [profile.business.name ? "business" : "", profile.products.catalogue.length ? "products" : "", profile.ordering.orderMethod ? "ordering" : "", profile.policies.allergens || profile.languageProfile.preferredPhrases.length ? "behaviour" : ""].filter(Boolean); }
-function createProfile(bakeryId: string): BakeryProfile { return { bakeryId, setupComplete: false, business: {}, products: { catalogue: [] }, ordering: {}, policies: {}, languageProfile: { warmth: "medium", formality: "casual", replyLength: "short", emojiFrequency: "low", preferredPhrases: [], bannedPhrases: [], askOneQuestionAtATime: true } }; }
+function createProfile(bakeryId: string): BakeryProfile { return { bakeryId, setupComplete: false, business: {}, products: { catalogue: [], items: [] }, ordering: { paymentMethods: [] }, policies: {}, languageProfile: { warmth: "medium", formality: "casual", replyLength: "short", emojiFrequency: "low", preferredPhrases: [], bannedPhrases: [], askOneQuestionAtATime: true } }; }
 async function loadProfiles(): Promise<void> { if (profilesLoaded) return; profilesLoaded = true; try { const value: unknown = JSON.parse(await readFile(profileFile, "utf8")); if (isRecord(value)) for (const [id, profile] of Object.entries(value)) if (isRecord(profile)) bakeryProfiles.set(id, normaliseProfile(id, profile)); } catch { /* No local profiles yet. */ } }
 async function saveProfiles(): Promise<void> { await mkdir(dirname(profileFile), { recursive: true }); await writeFile(profileFile, JSON.stringify(Object.fromEntries(bakeryProfiles), null, 2), "utf8"); }
-function normaliseProfile(id: string, value: Record<string, unknown>): BakeryProfile { const profile = createProfile(id); applyProfileUpdates(profile, value); profile.setupComplete = value.setupComplete === true; return profile; }
+function normaliseProfile(id: string, value: Record<string, unknown>): BakeryProfile { const profile = createProfile(id); applyProfileUpdates(profile, value); if (isRecord(value.products) && Array.isArray(value.products.items)) profile.products.items = value.products.items.map(normaliseItem).filter((item): item is BakeryItem => Boolean(item)); if (isRecord(value.ordering) && Array.isArray(value.ordering.paymentMethods)) profile.ordering.paymentMethods = value.ordering.paymentMethods.filter((method): method is string => typeof method === "string" && method.trim().length > 0); profile.setupComplete = value.setupComplete === true; return profile; }
+function normaliseItem(value: unknown): BakeryItem | null { if (!isRecord(value)) return null; const name = readString(value.name); if (!name) return null; const variations = readString(value.variations); const price = readString(value.price); const description = readString(value.description); return { name, ...(variations ? { variations } : {}), ...(price ? { price } : {}), ...(description ? { description } : {}) }; }
 function readOpenAiContent(payload: unknown): string { if (!isRecord(payload) || !Array.isArray(payload.choices) || !isRecord(payload.choices[0]) || !isRecord(payload.choices[0].message) || typeof payload.choices[0].message.content !== "string") throw new Error("OpenAI response did not include a message."); return payload.choices[0].message.content; }
 function readOpenAiError(payload: unknown): string { return isRecord(payload) && isRecord(payload.error) && typeof payload.error.message === "string" ? payload.error.message : "OpenAI request failed."; }
 function readString(value: unknown): string | undefined { return typeof value === "string" && value.trim() ? value.trim() : undefined; }

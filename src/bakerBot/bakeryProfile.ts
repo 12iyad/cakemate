@@ -1,263 +1,155 @@
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+
 export interface BakeryProfile {
   bakeryId: string;
-  business: {
-    bakerName?: string;
-    name?: string;
-    story?: string;
-    location?: string;
-    openingHours?: string;
-  };
-  products: {
-    summary?: string;
-    catalogue?: string[];
-    pricingNotes?: string;
-    customisationNotes?: string;
-  };
-  ordering: {
-    orderMethod?: string;
-    leadTime?: string;
-    deposit?: string;
-    collection?: boolean;
-    delivery?: boolean;
-    deliveryAreas?: string;
-    paymentProcess?: string;
-  };
-  policies: {
-    cancellations?: string;
-    refunds?: string;
-    allergens?: string;
-    dietaryOptions?: string;
-    escalationRules?: string;
-  };
-  languageProfile: {
-    warmth: "low" | "medium" | "high";
-    formality: "casual" | "balanced" | "professional";
-    replyLength: "short" | "medium" | "detailed";
-    emojiFrequency: "none" | "low" | "medium";
-    preferredPhrases: string[];
-    bannedPhrases: string[];
-    askOneQuestionAtATime: boolean;
-  };
+  setupComplete: boolean;
+  business: { bakerName?: string; name?: string; story?: string; location?: string; openingHours?: string };
+  products: { summary?: string; catalogue: string[]; pricingNotes?: string; customisationNotes?: string };
+  ordering: { orderMethod?: string; leadTime?: string; deposit?: string; collection?: boolean; delivery?: boolean; deliveryAreas?: string; paymentProcess?: string };
+  policies: { cancellations?: string; refunds?: string; allergens?: string; dietaryOptions?: string; escalationRules?: string };
+  languageProfile: { warmth: "low" | "medium" | "high"; formality: "casual" | "balanced" | "professional"; replyLength: "short" | "medium" | "detailed"; emojiFrequency: "none" | "low" | "medium"; preferredPhrases: string[]; bannedPhrases: string[]; askOneQuestionAtATime: boolean };
 }
 
-export interface SetupResponse {
-  sessionId: string;
-  bakeryId: string;
-  profile: BakeryProfile;
-  assistantMessage: string;
-  progress: number;
-  completedSteps: string[];
-  nextStep: string;
-}
+export interface SetupResponse { sessionId: string; bakeryId: string; profile: BakeryProfile; assistantMessage: string; progress: number; completedSteps: string[]; nextStep: string; }
 
-interface SetupSession {
-  id: string;
-  bakeryId: string;
-  profile: BakeryProfile;
-  currentStep: SetupStep;
-  completedSteps: Set<SetupStep>;
-}
+interface SetupSession { id: string; bakeryId: string; profile: BakeryProfile; messages: Array<{ role: "baker" | "agent"; content: string }>; }
+interface AiSetupReply { profileUpdates?: unknown; assistantMessage?: string; readyForTest?: boolean; }
 
-type SetupStep = "welcome" | "business" | "products" | "ordering" | "policies" | "personality" | "test" | "complete";
-
+const profileFile = join(process.cwd(), "data", "bakery-profiles.json");
 const bakeryProfiles = new Map<string, BakeryProfile>();
 const setupSessions = new Map<string, SetupSession>();
+let profilesLoaded = false;
 
-export function getBakeryProfile(bakeryId = "demo-bakery"): BakeryProfile {
+export async function getBakeryProfile(bakeryId = "demo-bakery"): Promise<BakeryProfile> {
+  await loadProfiles();
   const existing = bakeryProfiles.get(bakeryId);
   if (existing) return existing;
   const profile = createProfile(bakeryId);
   bakeryProfiles.set(bakeryId, profile);
+  await saveProfiles();
   return profile;
 }
 
-export function getSetupWelcome(sessionId?: string, bakeryId?: string): SetupResponse {
-  const session = getOrCreateSession(sessionId, bakeryId);
-  return responseFor(
-    session,
-    "hey, i’m your cakemate setup assistant. before i start building your agent — what’s your name, and what got you into baking?",
-  );
+export async function getSetupWelcome(sessionId?: string, bakeryId?: string): Promise<SetupResponse> {
+  const session = await getOrCreateSession(sessionId, bakeryId);
+  const returning = session.profile.business.name;
+  const assistantMessage = returning
+    ? `welcome back — i’ve still got ${returning}. what would you like your cakemate to learn or change today?`
+    : "hey, i’m your cakemate setup assistant. before i start building your agent — what’s your name, and what got you into baking?";
+  session.messages.push({ role: "agent", content: assistantMessage });
+  return responseFor(session, assistantMessage);
 }
 
-export function processSetupMessage(input: unknown): SetupResponse {
-  if (!isRecord(input) || typeof input.message !== "string") {
-    throw new Error("Request body must include a message.");
-  }
-
-  const session = getOrCreateSession(
+export async function processSetupMessage(input: unknown): Promise<SetupResponse> {
+  if (!isRecord(input) || typeof input.message !== "string") throw new Error("Request body must include a message.");
+  const session = await getOrCreateSession(
     typeof input.sessionId === "string" ? input.sessionId : undefined,
     typeof input.bakeryId === "string" ? input.bakeryId : undefined,
   );
   const message = input.message.trim();
+  if (!message) throw new Error("Write a message before sending it.");
 
-  if (!message) {
-    throw new Error("Write a message before sending it.");
-  }
-
-  learnFromMessage(session.profile, session.currentStep, message);
-  session.completedSteps.add(session.currentStep);
-  session.currentStep = nextStep(session.currentStep);
+  session.messages.push({ role: "baker", content: message });
+  const aiReply = await askSetupAgent(session);
+  applyProfileUpdates(session.profile, aiReply.profileUpdates);
+  session.profile.setupComplete = Boolean(aiReply.readyForTest) && hasEnoughContext(session.profile);
   bakeryProfiles.set(session.bakeryId, session.profile);
+  await saveProfiles();
 
-  return responseFor(session, questionFor(session));
+  const assistantMessage = aiReply.assistantMessage?.trim() || "i’ve noted that. what else would you like your agent to know?";
+  session.messages.push({ role: "agent", content: assistantMessage });
+  return responseFor(session, assistantMessage);
 }
 
-export function resetSetupSession(sessionId?: string, bakeryId?: string): SetupResponse {
-  if (sessionId) {
-    setupSessions.delete(sessionId);
-  }
-
-  const normalizedBakeryId = bakeryId?.trim() || "demo-bakery";
-  bakeryProfiles.set(normalizedBakeryId, createProfile(normalizedBakeryId));
-  return getSetupWelcome(undefined, normalizedBakeryId);
+export async function resetSetupSession(sessionId?: string, bakeryId?: string): Promise<SetupResponse> {
+  if (sessionId) setupSessions.delete(sessionId);
+  const id = bakeryId?.trim() || "demo-bakery";
+  await loadProfiles();
+  bakeryProfiles.set(id, createProfile(id));
+  await saveProfiles();
+  return getSetupWelcome(undefined, id);
 }
 
 export function customerAgentContext(profile: BakeryProfile): string {
-  return JSON.stringify({
-    business: profile.business,
-    products: profile.products,
-    ordering: profile.ordering,
-    policies: profile.policies,
-    languageProfile: profile.languageProfile,
-  });
+  return JSON.stringify({ business: profile.business, products: profile.products, ordering: profile.ordering, policies: profile.policies, languageProfile: profile.languageProfile });
 }
 
-function getOrCreateSession(sessionId?: string, requestedBakeryId?: string): SetupSession {
-  if (sessionId) {
-    const existing = setupSessions.get(sessionId);
-    if (existing) return existing;
-  }
-
-  const id = crypto.randomUUID();
+async function getOrCreateSession(sessionId?: string, requestedBakeryId?: string): Promise<SetupSession> {
+  if (sessionId) { const existing = setupSessions.get(sessionId); if (existing) return existing; }
   const bakeryId = requestedBakeryId?.trim() || "demo-bakery";
-  const profile = getBakeryProfile(bakeryId);
-  const session: SetupSession = { id, bakeryId, profile, currentStep: "welcome", completedSteps: new Set() };
-  setupSessions.set(id, session);
+  const session: SetupSession = { id: crypto.randomUUID(), bakeryId, profile: await getBakeryProfile(bakeryId), messages: [] };
+  setupSessions.set(session.id, session);
   return session;
 }
 
-function createProfile(bakeryId: string): BakeryProfile {
-  return {
-    bakeryId,
-    business: {},
-    products: { catalogue: [] },
-    ordering: {},
-    policies: {},
-    languageProfile: {
-      warmth: "medium",
-      formality: "casual",
-      replyLength: "short",
-      emojiFrequency: "low",
-      preferredPhrases: [],
-      bannedPhrases: [],
-      askOneQuestionAtATime: true,
-    },
-  };
+async function askSetupAgent(session: SetupSession): Promise<AiSetupReply> {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error("Missing OPENAI_API_KEY. Add it to .env before using the setup agent.");
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST", headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+    body: JSON.stringify({ model: process.env.OPENAI_MODEL ?? "gpt-4o-mini", temperature: 0.45, response_format: { type: "json_object" }, messages: [
+      { role: "system", content: setupSystemPrompt() },
+      { role: "user", content: JSON.stringify({ bakeryProfile: session.profile, conversation: session.messages.slice(-16) }) },
+    ] }),
+  });
+  const payload: unknown = await response.json();
+  if (!response.ok) throw new Error(readOpenAiError(payload));
+  const content = readOpenAiContent(payload);
+  const parsed: unknown = JSON.parse(content);
+  if (!isRecord(parsed)) throw new Error("Setup agent returned an invalid response.");
+  const assistantMessage = readString(parsed.assistantMessage);
+  return { profileUpdates: parsed.profileUpdates, ...(assistantMessage ? { assistantMessage } : {}), readyForTest: parsed.readyForTest === true };
 }
 
-function learnFromMessage(profile: BakeryProfile, step: SetupStep, message: string): void {
-  const lower = message.toLowerCase();
+function setupSystemPrompt(): string {
+  return `You are Cakemate's baker onboarding agent. You are helping a baker train an AI employee, not filling in a form.
 
-  // Test-mode feedback can arrive at any point, so it always updates the language profile.
-  if (/too formal/.test(lower)) profile.languageProfile.formality = "casual";
-  if (/too long/.test(lower)) profile.languageProfile.replyLength = "short";
-  if (/no emojis?/.test(lower)) profile.languageProfile.emojiFrequency = "none";
+Have a natural, warm conversation. Understand what the baker says, update the structured profile, then ask only the single most useful next question. Do not repeat a question if the answer is already in the profile. Learn their actual language and preferences from their wording. Do not invent business facts, prices, availability, policies, or personality traits.
 
-  if (step === "welcome") {
-    const bakerName = capture(message, /(?:my name(?:'s| is)?|i(?:'m| am))\s+([a-z][a-z '-]{1,40})/i);
-    if (bakerName) profile.business.bakerName = bakerName;
-    profile.business.story = message;
-  }
+Explore only what is useful: bakery name and story, products and variations, prices, ordering method, lead time, deposits, collection/delivery, payments, policies, allergens/dietary requests, escalation rules, and voice. When enough useful context exists to make a safe first customer-agent test, say you have built the first version and invite them to test it.
 
-  if (step === "business") {
-    const businessName = capture(message, /(?:called|name(?:'s| is)?|business(?: is|'s))\s+([\w&' -]{2,60})/i);
-    const location = capture(message, /(?:based in|from|in)\s+([a-z][a-z ,' -]{2,50})/i);
-    if (businessName) profile.business.name = businessName;
-    if (location) profile.business.location = location;
-    if (!profile.business.name) profile.business.name = message;
-  }
+Return JSON only:
+{
+  "profileUpdates": { "business": {}, "products": {}, "ordering": {}, "policies": {}, "languageProfile": {} },
+  "assistantMessage": "short natural reply with one useful next question",
+  "readyForTest": false
+}
 
-  if (step === "products") {
-    profile.products.summary = message;
-    profile.products.catalogue = splitCatalogue(message);
-    const money = message.match(/(?:£\s?\d+(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?\s?(?:pounds?|quid))/gi);
-    if (money?.length) profile.products.pricingNotes = money.join(", ");
-  }
+profileUpdates must contain only facts stated or clearly implied by the baker. Products.catalogue and the phrase arrays are string arrays. The customer-facing agent must never promise availability, pricing, delivery, allergy safety, or final acceptance without the baker.`;
+}
 
-  if (step === "ordering") {
-    profile.ordering.orderMethod = message;
-    const leadTime = capture(message, /(?:need|need at least|lead time(?: is)?|usually need)\s+([^.,;]+(?:days?|weeks?|hours?)[^.,;]*)/i);
-    const deposit = capture(message, /((?:£\s?\d+(?:\.\d{1,2})?|\d+\s?(?:pounds?|quid))\s*(?:deposit)?)/i);
-    const deliveryAreas = capture(message, /(?:deliver(?:y)? (?:to|around|in)|areas? (?:are|include))\s+([^.;]+)/i);
-    if (leadTime) profile.ordering.leadTime = leadTime;
-    if (deposit) profile.ordering.deposit = deposit;
-    if (/\b(collection|collect|pickup|pick up)\b/.test(lower)) profile.ordering.collection = true;
-    if (/\b(deliver|delivery)\b/.test(lower)) profile.ordering.delivery = true;
-    if (deliveryAreas) profile.ordering.deliveryAreas = deliveryAreas;
-  }
-
-  if (step === "policies") {
-    profile.policies.allergens = message;
-    if (/\b(cancel|refund)\b/.test(lower)) profile.policies.cancellations = message;
-    if (/\b(dietary|vegan|gluten|halal)\b/.test(lower)) profile.policies.dietaryOptions = message;
-    if (/\b(ask me|escalat|not sure|complicated|custom)\b/.test(lower)) profile.policies.escalationRules = message;
-  }
-
-  if (step === "personality") {
-    if (/less friendly|short.?direct|brief/.test(lower)) {
-      profile.languageProfile.warmth = "low";
-      profile.languageProfile.replyLength = "short";
-    }
-    if (/warm|friendly|like me/.test(lower)) profile.languageProfile.warmth = "high";
-    if (/professional|premium/.test(lower)) profile.languageProfile.formality = "professional";
-    if (/no emoji|without emoji/.test(lower)) profile.languageProfile.emojiFrequency = "none";
-    if (/few emoji|low emoji/.test(lower)) profile.languageProfile.emojiFrequency = "low";
-    if (/i(?: would|'d) say|i say/.test(lower)) profile.languageProfile.preferredPhrases.push(message);
-    if (/don't say|do not say|hate the word/.test(lower)) profile.languageProfile.bannedPhrases.push(message);
+function applyProfileUpdates(profile: BakeryProfile, value: unknown): void {
+  if (!isRecord(value)) return;
+  patchStrings(profile.business, value.business, ["bakerName", "name", "story", "location", "openingHours"]);
+  patchStrings(profile.products, value.products, ["summary", "pricingNotes", "customisationNotes"]);
+  patchStringArray(profile.products, value.products, "catalogue");
+  patchStrings(profile.ordering, value.ordering, ["orderMethod", "leadTime", "deposit", "deliveryAreas", "paymentProcess"]);
+  patchBooleans(profile.ordering, value.ordering, ["collection", "delivery"]);
+  patchStrings(profile.policies, value.policies, ["cancellations", "refunds", "allergens", "dietaryOptions", "escalationRules"]);
+  if (isRecord(value.languageProfile)) {
+    const style = value.languageProfile;
+    if (style.warmth === "low" || style.warmth === "medium" || style.warmth === "high") profile.languageProfile.warmth = style.warmth;
+    if (style.formality === "casual" || style.formality === "balanced" || style.formality === "professional") profile.languageProfile.formality = style.formality;
+    if (style.replyLength === "short" || style.replyLength === "medium" || style.replyLength === "detailed") profile.languageProfile.replyLength = style.replyLength;
+    if (style.emojiFrequency === "none" || style.emojiFrequency === "low" || style.emojiFrequency === "medium") profile.languageProfile.emojiFrequency = style.emojiFrequency;
+    if (typeof style.askOneQuestionAtATime === "boolean") profile.languageProfile.askOneQuestionAtATime = style.askOneQuestionAtATime;
+    patchStringArray(profile.languageProfile, style, "preferredPhrases"); patchStringArray(profile.languageProfile, style, "bannedPhrases");
   }
 }
 
-function questionFor(session: SetupSession): string {
-  const name = session.profile.business.bakerName ? ` ${session.profile.business.bakerName.split(" ")[0]},` : "";
-  switch (session.currentStep) {
-    case "business": return `love that${name} — what’s the bakery called, and where are you based?`;
-    case "products": return "nice. what do you actually sell day to day? tell me the main things, sizes, flavours and any custom bits — messy notes are completely fine.";
-    case "ordering": return "got it. how do customers normally order from you — how much notice do you need, do you take a deposit, and is it collection, delivery or both?";
-    case "policies": return "i’ve got the basics. what should the agent be careful about: allergens, dietary requests, cancellations, refunds, unavailable dates or complicated orders?";
-    case "personality": return "last bit: how should your assistant sound? try: warm & friendly, short & direct, premium, professional, or ‘like me’. you can also tell me words you’d never say.";
-    case "test": return "perfect — i’m cooking up your cakemate agent. or should i say brownie mate, depending on the menu. switch to Customer agent and try a real enquiry; its replies will now use what you’ve taught me.";
-    case "complete": return "your profile is ready to test. keep chatting here whenever you want to teach your agent a new rule or phrase.";
-    default: return "tell me a little about your bakery.";
-  }
-}
+function patchStrings<T extends object>(target: T, source: unknown, keys: string[]): void { const record = target as Record<string, unknown>; if (isRecord(source)) for (const key of keys) { const value = readString(source[key]); if (value) record[key] = value; } }
+function patchBooleans<T extends object>(target: T, source: unknown, keys: string[]): void { const record = target as Record<string, unknown>; if (isRecord(source)) for (const key of keys) if (typeof source[key] === "boolean") record[key] = source[key]; }
+function patchStringArray<T extends object>(target: T, source: unknown, key: string): void { const record = target as Record<string, unknown>; if (isRecord(source) && Array.isArray(source[key])) record[key] = source[key].filter((item): item is string => typeof item === "string" && item.trim().length > 0).slice(0, 20); }
 
-function nextStep(step: SetupStep): SetupStep {
-  const steps: SetupStep[] = ["welcome", "business", "products", "ordering", "policies", "personality", "test", "complete"];
-  return steps[Math.min(steps.indexOf(step) + 1, steps.length - 1)] ?? "complete";
-}
-
-function responseFor(session: SetupSession, assistantMessage: string): SetupResponse {
-  const completedSteps = ["welcome", "business", "products", "ordering", "policies", "personality"].filter((step) => session.completedSteps.has(step as SetupStep));
-  return {
-    sessionId: session.id,
-    bakeryId: session.bakeryId,
-    profile: session.profile,
-    assistantMessage,
-    progress: Math.round((completedSteps.length / 6) * 100),
-    completedSteps,
-    nextStep: session.currentStep,
-  };
-}
-
-function splitCatalogue(value: string): string[] {
-  return value.split(/[,;\n]|\band\b/gi).map((item) => item.trim()).filter((item) => item.length > 2).slice(0, 8);
-}
-
-function capture(value: string, expression: RegExp): string | undefined {
-  const match = value.match(expression);
-  return match?.[1]?.trim();
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+function hasEnoughContext(profile: BakeryProfile): boolean { return Boolean(profile.business.name && profile.products.catalogue.length > 0 && profile.ordering.orderMethod); }
+function responseFor(session: SetupSession, assistantMessage: string): SetupResponse { const completed = profileProgress(session.profile); return { sessionId: session.id, bakeryId: session.bakeryId, profile: session.profile, assistantMessage, progress: completed.length * 25, completedSteps: completed, nextStep: session.profile.setupComplete ? "complete" : "setup" }; }
+function profileProgress(profile: BakeryProfile): string[] { return [profile.business.name ? "business" : "", profile.products.catalogue.length ? "products" : "", profile.ordering.orderMethod ? "ordering" : "", profile.policies.allergens || profile.languageProfile.preferredPhrases.length ? "behaviour" : ""].filter(Boolean); }
+function createProfile(bakeryId: string): BakeryProfile { return { bakeryId, setupComplete: false, business: {}, products: { catalogue: [] }, ordering: {}, policies: {}, languageProfile: { warmth: "medium", formality: "casual", replyLength: "short", emojiFrequency: "low", preferredPhrases: [], bannedPhrases: [], askOneQuestionAtATime: true } }; }
+async function loadProfiles(): Promise<void> { if (profilesLoaded) return; profilesLoaded = true; try { const value: unknown = JSON.parse(await readFile(profileFile, "utf8")); if (isRecord(value)) for (const [id, profile] of Object.entries(value)) if (isRecord(profile)) bakeryProfiles.set(id, normaliseProfile(id, profile)); } catch { /* No local profiles yet. */ } }
+async function saveProfiles(): Promise<void> { await mkdir(dirname(profileFile), { recursive: true }); await writeFile(profileFile, JSON.stringify(Object.fromEntries(bakeryProfiles), null, 2), "utf8"); }
+function normaliseProfile(id: string, value: Record<string, unknown>): BakeryProfile { const profile = createProfile(id); applyProfileUpdates(profile, value); profile.setupComplete = value.setupComplete === true; return profile; }
+function readOpenAiContent(payload: unknown): string { if (!isRecord(payload) || !Array.isArray(payload.choices) || !isRecord(payload.choices[0]) || !isRecord(payload.choices[0].message) || typeof payload.choices[0].message.content !== "string") throw new Error("OpenAI response did not include a message."); return payload.choices[0].message.content; }
+function readOpenAiError(payload: unknown): string { return isRecord(payload) && isRecord(payload.error) && typeof payload.error.message === "string" ? payload.error.message : "OpenAI request failed."; }
+function readString(value: unknown): string | undefined { return typeof value === "string" && value.trim() ? value.trim() : undefined; }
+function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }

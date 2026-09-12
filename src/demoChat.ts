@@ -6,7 +6,7 @@ import { detectCustomerIntent } from "./bakerBot/intent.js";
 import { refreshMissingFields } from "./bakerBot/leadIntake.js";
 import { processCustomerMessage } from "./bakerBot/orchestrator.js";
 import { sendBakerLeadEmail } from "./emailSender.js";
-import { customerAgentContext, getBakeryProfile } from "./bakerBot/bakeryProfile.js";
+import { customerAgentContext, getBakeryProfile, type BakeryProfile } from "./bakerBot/bakeryProfile.js";
 import type { BotDecision, ConversationState, LeadEnquiry } from "./bakerBot/types.js";
 
 export interface DemoChatRequest {
@@ -309,7 +309,7 @@ async function extractLeadWithOpenAi(
       messages: [
         {
           role: "system",
-          content: buildDemoSystemPrompt(session.bakeryId),
+          content: buildDemoSystemPrompt(await getBakeryProfile(session.bakeryId)),
         },
         {
           role: "user",
@@ -329,13 +329,13 @@ async function extractLeadWithOpenAi(
   return JSON.parse(content);
 }
 
-function buildDemoSystemPrompt(bakeryId: string): string {
+function buildDemoSystemPrompt(profile: BakeryProfile): string {
   return `${aiExtractionSystemPrompt}
 
 ${cakeMenuPrompt}
 
 Configured bakery profile:
-${customerAgentContext(getBakeryProfile(bakeryId))}
+${customerAgentContext(profile)}
 
 Profile behaviour:
 - Treat this profile as the bakery's source of truth. Use its products, ordering rules, policies and language style where provided.

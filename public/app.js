@@ -21,7 +21,6 @@ $("#restartButton").addEventListener("click", resetTraining);
 $("#resetCustomer").addEventListener("click", resetCustomer);
 $("#exampleButton").addEventListener("click", () => { $("#customerInput").value = "hi, can i get a biscoff cake for saturday?"; $("#customerInput").focus(); });
 document.querySelectorAll(".tab").forEach((tab) => tab.addEventListener("click", () => { if (!tab.disabled) switchTab(tab.dataset.tab); }));
-document.querySelectorAll("[data-style]").forEach((button) => button.addEventListener("click", () => sendTrain(button.dataset.style)));
 
 if (bakeryId) { $("#loginView").hidden = true; $("#appView").hidden = false; loadWelcome(); }
 
@@ -36,7 +35,7 @@ async function sendTrain(message) {
 }
 function receiveTraining(payload) {
   setupSessionId = payload.sessionId; window.localStorage.setItem("cakemateSetupSession", setupSessionId);
-  addMessage(trainMessages, "agent", payload.assistantMessage); $("#styleChoices").hidden = payload.nextStep !== "personality";
+  addMessage(trainMessages, "agent", payload.assistantMessage);
   const done = payload.progress === 100; testTab.disabled = !done; testTab.querySelector(".lock").textContent = done ? "Ready" : "Locked";
   if (payload.profile.business.name) $("#customerHeading").textContent = `@${payload.profile.business.name.replace(/\s+/g, "").toLowerCase()} DMs`;
 }

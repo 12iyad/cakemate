@@ -46,7 +46,7 @@ const server = createServer(async (request, response) => {
   if (request.method === "GET" && requestUrl.pathname === "/api/setup/welcome") {
     const sessionId = requestUrl.searchParams.get("sessionId") ?? undefined;
     const bakeryId = requestUrl.searchParams.get("bakeryId") ?? undefined;
-    sendJson(response, 200, getSetupWelcome(sessionId, bakeryId));
+    sendJson(response, 200, await getSetupWelcome(sessionId, bakeryId));
     return;
   }
 
@@ -169,7 +169,7 @@ async function handleDemoSendEmailRequest(
 
 async function handleSetupChatRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
   try {
-    sendJson(response, 200, processSetupMessage(await readJsonBody(request)));
+    sendJson(response, 200, await processSetupMessage(await readJsonBody(request)));
   } catch (error) {
     sendJson(response, 400, { error: error instanceof Error ? error.message : "Setup chat request failed." });
   }
@@ -180,7 +180,7 @@ async function handleSetupResetRequest(request: IncomingMessage, response: Serve
     const body = await readJsonBody(request);
     const sessionId = isRecord(body) && typeof body.sessionId === "string" ? body.sessionId : undefined;
     const bakeryId = isRecord(body) && typeof body.bakeryId === "string" ? body.bakeryId : undefined;
-    sendJson(response, 200, resetSetupSession(sessionId, bakeryId));
+    sendJson(response, 200, await resetSetupSession(sessionId, bakeryId));
   } catch (error) {
     sendJson(response, 400, { error: error instanceof Error ? error.message : "Setup reset failed." });
   }

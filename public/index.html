@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>cakemate.ai — local demo</title>
+    <link rel="stylesheet" href="/styles.css?v=7" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar"><a class="brand" href="#"><span>cm</span> cakemate.ai</a><span class="local-badge">local demo</span></header>
+      <section class="hero"><p class="eyebrow">Your bakery, your voice</p><h1>Build the agent your customers wish you had time to be.</h1><p>Teach it how your bakery works, then test its replies before it ever reaches your DMs.</p></section>
+      <section id="loginView" class="center-card login-card">
+        <p class="eyebrow">Welcome</p><h2>Set up your local bakery space</h2><p>This is only a demo sign-in. It gives your bakery its own local agent context.</p>
+        <form id="loginForm"><label>Your name<input id="loginName" required autocomplete="name" placeholder="e.g. Amira" /></label><label>Bakery name<input id="loginBakery" required placeholder="e.g. Sweet Crumbs" /></label><button type="submit">Continue <span>→</span></button></form>
+      </section>
+      <section id="appView" hidden>
+        <nav class="tabs" aria-label="Agent modes"><button class="tab is-active" type="button" data-tab="train">Train your agent</button><button id="testTab" class="tab" type="button" data-tab="test" disabled>Test as a customer <span class="lock">Locked</span></button></nav>
+        <section id="trainView" class="chat-wrap"><div class="chat-top"><div><p class="eyebrow">Your Cakemate</p><h2>Teach your new teammate</h2></div><button id="restartButton" class="quiet-button" type="button">Start again</button></div><div id="trainMessages" class="messages" aria-live="polite"></div><div id="styleChoices" class="style-choices" hidden><button type="button" data-style="Warm & friendly">Warm & friendly</button><button type="button" data-style="Short & direct">Short & direct</button><button type="button" data-style="Premium">Premium</button><button type="button" data-style="Professional">Professional</button><button type="button" data-style="Like me">Like me</button></div><form id="trainForm" class="composer"><input id="trainInput" autocomplete="off" placeholder="Tell your agent about your bakery…" /><button type="submit">Send <span>→</span></button></form><p id="trainStatus" class="status" role="status"></p></section>
+        <section id="testView" class="chat-wrap" hidden><div class="chat-top"><div><p class="eyebrow">Customer simulation</p><h2 id="customerHeading">Your Instagram DMs</h2></div><button id="resetCustomer" class="quiet-button" type="button">Reset chat</button></div><div id="customerMessages" class="messages" aria-live="polite"><div class="empty-state"><p>Try a real customer question and see how your Cakemate replies.</p><button id="exampleButton" class="example" type="button">hi, can i get a biscoff cake for saturday?</button></div></div><form id="customerForm" class="composer"><input id="customerInput" autocomplete="off" placeholder="Message as a customer…" /><button type="submit">Send <span>→</span></button></form><p id="customerStatus" class="status" role="status"></p></section>
+      </section>
+    </main>
+    <script type="module" src="/app.js?v=7"></script>
+  </body>
+</html>

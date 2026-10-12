@@ -5,6 +5,7 @@ export type CustomerIntent =
   | "image_reference"
   | "order_status"
   | "thanks"
+  | "small_talk"
   | "order_detail"
   | "unknown";
 
@@ -33,6 +34,13 @@ export function detectCustomerIntent(message: string, hasImages: boolean): Inten
   if (/\b(thanks|thank you|ty|cheers|perfect thanks|okay thanks)\b/.test(normalized)) {
     return {
       intent: "thanks",
+      confidence: "high",
+    };
+  }
+
+  if (/\b(how are you|how r u|how are u|you alright|u alright|how's it going|hows it going)\b/.test(normalized)) {
+    return {
+      intent: "small_talk",
       confidence: "high",
     };
   }
@@ -74,9 +82,12 @@ export function detectCustomerIntent(message: string, hasImages: boolean): Inten
 export function isMenuQuestion(message: string): boolean {
   const normalized = normalize(message);
   const asksOptions = /\?/.test(normalized) || /\b(what|which|list|options|available|do you do|have you got|have u got|can you do|can u do)\b/.test(normalized);
-  const mentionsMenuArea = /\b(size|sizes|inch|inches|flavour|flavours|flavor|flavors|sponge|filling|fillings|buttercream|jam|biscoff|curd|layer|layers|topper|toppers|personalised|personalized|acrylic|charm|inspo|inspiration|decor|decoration|design ideas?|pictures?|pics?)\b/.test(normalized);
+  const mentionsMenuArea = /\b(menu|product|products|sell|offer|make|made|cake|cakes|cupcake|cupcakes|brownie|brownies|cookie|cookies|size|sizes|inch|inches|flavour|flavours|flavor|flavors|sponge|filling|fillings|buttercream|jam|biscoff|curd|layer|layers|topper|toppers|personalised|personalized|acrylic|charm|inspo|inspiration|decor|decoration|design ideas?|pictures?|pics?)\b/.test(normalized);
+  const asksAboutSpecificProduct = /(?:do|can) (?:you|u) (?:sell|stock|offer|do|make|have)\s+\S+/.test(normalized)
+    || /(?:have|do) (?:you|u) got\s+\S+/.test(normalized)
+    || /(?:can|could) (?:i|we) (?:get|order|have)\s+\S+/.test(normalized);
 
-  return asksOptions && mentionsMenuArea;
+  return asksAboutSpecificProduct || (asksOptions && mentionsMenuArea);
 }
 
 function normalize(message: string): string {

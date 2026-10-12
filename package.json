@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx src/server.ts",
+    "dev": "tsx watch src/server.ts",
     "build": "tsc --noEmit",
     "test": "node --test --loader ts-node/esm \"src/**/*.test.ts\""
   },

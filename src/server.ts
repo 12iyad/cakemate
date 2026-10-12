@@ -4,7 +4,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { extname, join } from "node:path";
 import { URL } from "node:url";
 import { getWebhookVerifyResponse } from "./bakerBot/channels.js";
-import { generateItemDescription, getSetupWelcome, processSetupMessage, resetSetupSession, saveOnboardingProfile } from "./bakerBot/bakeryProfile.js";
+import { generateItemDescription, getBakeryProfile, getSetupWelcome, processSetupMessage, resetSetupSession, saveOnboardingProfile } from "./bakerBot/bakeryProfile.js";
 import { handleDemoChat, resetDemoSession, sendDemoLeadEmail } from "./demoChat.js";
 
 const port = Number(process.env.PORT ?? 3000);
@@ -57,6 +57,20 @@ const server = createServer(async (request, response) => {
 
   if (request.method === "POST" && requestUrl.pathname === "/api/setup/reset") {
     await handleSetupResetRequest(request, response);
+    return;
+  }
+
+  if (request.method === "GET" && requestUrl.pathname === "/api/onboarding/profile") {
+    const bakeryId = requestUrl.searchParams.get("bakeryId")?.trim();
+    if (!bakeryId) {
+      sendJson(response, 400, { error: "A bakery ID is required." });
+      return;
+    }
+    try {
+      sendJson(response, 200, { profile: await getBakeryProfile(bakeryId) });
+    } catch {
+      sendJson(response, 500, { error: "Could not load your saved setup. Please retry." });
+    }
     return;
   }
 

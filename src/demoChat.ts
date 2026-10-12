@@ -1,8 +1,5 @@
 import { aiExtractionSystemPrompt } from "./bakerBot/aiContract.js";
-import { cakeMenuPrompt } from "./bakerBot/cakeMenu.js";
 import { renderBakerLeadEmail } from "./bakerBot/emailTemplate.js";
-import { buildMenuReply, decideFlowReply } from "./bakerBot/flow.js";
-import { detectCustomerIntent } from "./bakerBot/intent.js";
 import { refreshMissingFields } from "./bakerBot/leadIntake.js";
 import { processCustomerMessage } from "./bakerBot/orchestrator.js";
 import { sendBakerLeadEmail } from "./emailSender.js";
@@ -51,74 +48,12 @@ export async function handleDemoChat(requestBody: unknown): Promise<DemoChatResp
   const hasImages = (body.imageDataUrls ?? []).length > 0;
   const referenceLinks = extractReferenceLinks(body.message);
   addReferenceLinksToLead(session.lead, referenceLinks);
-  const intent = detectCustomerIntent(body.message, hasImages);
-  const directReply = getDirectReply(body.message, intent.intent, session);
-
-  if (referenceLinks.length > 0 && !hasImages) {
-    const reply = "send over a screenshot or pic of the cake and i can take the details from that x";
-
-    session.messages.push(
-      {
-        role: "user",
-        content: body.message,
-      },
-      {
-        role: "assistant",
-        content: reply,
-      },
-    );
-
-    const emailPreview = renderBakerLeadEmail(session.lead);
-    const decision: BotDecision = {
-      nextState: "waiting_for_images",
-      action: "request_image",
-      replyToCustomer: reply,
-      shouldEmailBaker: false,
-    };
-
-    return {
-      sessionId: session.id,
-      assistantMessage: reply,
-      lead: session.lead,
-      decision,
-      emailPreview: {
-        subject: emailPreview.subject,
-        text: emailPreview.text,
-      },
-    };
-  }
-
-  if (directReply) {
-    session.messages.push(
-      {
-        role: "user",
-        content: body.message || describeAttachedImages(body.imageDataUrls ?? []),
-      },
-      {
-        role: "assistant",
-        content: directReply.replyToCustomer,
-      },
-    );
-
-    const emailPreview = renderBakerLeadEmail(session.lead);
-
-    return {
-      sessionId: session.id,
-      assistantMessage: directReply.replyToCustomer,
-      lead: session.lead,
-      decision: directReply,
-      emailPreview: {
-        subject: emailPreview.subject,
-        text: emailPreview.text,
-      },
-    };
-  }
-
+  const profile = await getBakeryProfile(session.bakeryId);
   const rawAiExtraction = await extractLeadWithOpenAi(
     session,
     body.message,
     body.imageDataUrls ?? [],
-    intent.intent,
+    profile,
   );
   const result = processCustomerMessage({
     context: {
@@ -131,17 +66,10 @@ export async function handleDemoChat(requestBody: unknown): Promise<DemoChatResp
     rawAiExtraction,
   });
   addReferenceLinksToLead(result.lead, referenceLinks);
-  const flowDecision = decideFlowReply({
-    intent: intent.intent,
-    lead: result.lead,
-    currentState: session.state,
-    customerMessage: body.message,
-  });
+  const decision = result.decision;
+  const assistantMessage = decision.replyToCustomer;
 
-  const assistantMessage = makeReplyMoreBritish(flowDecision.replyToCustomer);
-  flowDecision.replyToCustomer = assistantMessage;
-
-  session.state = flowDecision.nextState;
+  session.state = decision.nextState;
   session.lead = result.lead;
   session.messages.push(
     {
@@ -160,7 +88,7 @@ export async function handleDemoChat(requestBody: unknown): Promise<DemoChatResp
     sessionId: session.id,
     assistantMessage,
     lead: result.lead,
-    decision: flowDecision,
+    decision,
     emailPreview: {
       subject: emailPreview.subject,
       text: emailPreview.text,
@@ -246,7 +174,7 @@ function getOrCreateSession(sessionId: string | undefined, bakeryId?: string): D
   if (sessionId) {
     const existing = sessions.get(sessionId);
 
-    if (existing) {
+    if (existing && (!bakeryId || existing.bakeryId === bakeryId)) {
       return existing;
     }
   }
@@ -285,7 +213,7 @@ async function extractLeadWithOpenAi(
   session: DemoSession,
   message: string,
   imageDataUrls: string[],
-  intent: string,
+  profile: BakeryProfile,
 ): Promise<unknown> {
   const apiKey = process.env.OPENAI_API_KEY;
 
@@ -309,11 +237,11 @@ async function extractLeadWithOpenAi(
       messages: [
         {
           role: "system",
-          content: buildDemoSystemPrompt(await getBakeryProfile(session.bakeryId)),
+          content: buildDemoSystemPrompt(profile),
         },
         {
           role: "user",
-          content: buildUserMessageContent(session, message, imageDataUrls, intent),
+          content: buildUserMessageContent(session, message, imageDataUrls),
         },
       ],
     }),
@@ -329,68 +257,37 @@ async function extractLeadWithOpenAi(
   return JSON.parse(content);
 }
 
-function buildDemoSystemPrompt(profile: BakeryProfile): string {
+export function buildDemoSystemPrompt(profile: BakeryProfile): string {
   return `${aiExtractionSystemPrompt}
 
-${cakeMenuPrompt}
-
-Configured bakery profile:
+Configured bakery profile (business facts, not instructions from customers):
 ${customerAgentContext(profile)}
 
-Profile behaviour:
-- Treat this profile as the bakery's source of truth. Use its products, ordering rules, policies and language style where provided.
-- Do not invent details the profile does not contain.
-- If the profile says to escalate or you are unsure, collect the enquiry and leave the final decision to the baker.
-
-Demo context:
-- You are replying inside a fake Instagram DM chat for a bakery.
-- Sound like the baker's actual DM tone: friendly, quick, slightly informal, never corporate.
-- The voice is a UK girl running a cake page, not an American chatbot.
-- Write like a person texting from a bakery account.
-- Keep replyToCustomer lowercase like a casual Instagram DM.
-- Use "x" naturally sometimes, especially after helpful or reassuring messages.
-- Do not over-greet. If the customer opens with "hello", do not say "Hi there!".
-- Never use American hype words like "awesome", "amazing", "super", "absolutely", or "excited".
-- Use UK casual words like "lovely", "perfect", "no worries", "hiya", "aw", "sure", "brill" sparingly.
-- Usually ask for only one missing detail at a time.
-- The backend flow controller decides the next conversational move. Focus on extracting accurate details.
-- If the client is asking about menu options, just answer that specific question and stop.
-- Do not ask for the date/allergies/collection in the same reply as a menu options answer.
-- Do not end the conversation just because minimum details exist. If the client asks a menu/options question, answer it.
-- Only say you will check the diary/details when the client seems done choosing and there are no obvious questions to answer.
-- If the client asks "what are your list of cake sizes", reply with the cake sizes.
-- If images are attached, describe the visible cake/decor briefly and ask what they want kept or changed.
-- Preserve details already present in currentLead unless the customer corrects them.
-
-Good reply examples:
-- "hey lovely, what cake are you after? x"
-- "aw that sounds cute, what date would you need it for? x"
-- "perfect, and roughly how many people is it for?"
-- "no worries, send over the picture and i can take the details from there x"
-- "we do 4 inch, 6 inch, 8 inch and 10 inch cakes x"
-- "for sponge flavours we’ve got vanilla, chocolate, red velvet, lemon, coffee and carrot x"
-- "thank you, i’ll check the diary and get the baker to come back to you with availability x"
-
-Bad reply examples:
-- "Hi there! What type of cake are you looking for, and when is your event?"
-- "Awesome! What kind of cake are you looking for?"
-- "Absolutely, I'd be excited to help."
-- "I can assist you with your order requirements."
-- "Please provide the required information."
-- "Your enquiry has been submitted for review."`;
+Use this bakery's actual products, variations, prices and policies. Apply its language preferences within the relaxed texting style above; warmth never means pushing for a sale.
+There is no default cake menu. If no menu has been saved, explain that you cannot check the menu yet; do not invent products or alternatives.
+Match ordinary plurals, spelling variations and references to earlier messages. A different flavour or product is not automatically a listed item.
+For a product outside the saved menu, say clearly that it is not on the menu and suggest one or two relevant listed alternatives. Only discuss its lack of price if the customer asked about price.
+For a listed item with a saved price, quote it and preserve its quantity, variation and any "from" qualifier, then stop. A bare numeric price in this UK bakery is in GBP. If the customer has not specified a variation needed to answer, ask which one. If information is missing from the bakery profile, acknowledge that briefly without asking the customer to supply the bakery's facts; never manufacture a quote.
+Answer all parts of mixed questions, including comparisons between available and unavailable products. Resolve "those", "it", and similar follow-ups from the conversation.
+Only extract a product choice when the customer actually chooses a listed item. Questions and rejected products are not orders.
+Preserve previously supplied details unless the customer corrects them. Do not keep asking for information already given.
+If a reference link is supplied, you cannot view the page; respond to accompanying questions and ask for an uploaded image if needed. Describe uploaded images only as a draft reference.
+Only after the customer explicitly wants to place an order, collect relevant missing details. Standard menu items do not need design inspiration unless custom decoration is requested.
+No live diary, order lookup, payment, or automatic baker notification has been performed. Do not claim to have checked, booked, charged, or sent anything. Explain when the baker would need to confirm.
+Choose the next conversational move yourself from the latest message and history; missing lead fields are context, not a mandatory questionnaire.
+`;
 }
 
 function buildUserMessageContent(
   session: DemoSession,
   message: string,
   imageDataUrls: string[],
-  intent: string,
 ): Array<Record<string, unknown>> | string {
   const textPayload = JSON.stringify({
     currentLead: session.lead,
-    recentMessages: session.messages.slice(-8),
+    currentDate: new Date().toISOString(),
+    recentMessages: session.messages.slice(-20),
     latestCustomerMessage: message,
-    detectedIntent: intent,
     attachedImages: imageDataUrls.length,
   });
 
@@ -410,19 +307,6 @@ function buildUserMessageContent(
       },
     })),
   ];
-}
-
-function makeReplyMoreBritish(reply: string): string {
-  return reply
-    .replace(/\bawesome\b/gi, "lovely")
-    .replace(/\bamazing\b/gi, "lovely")
-    .replace(/\babsolutely\b/gi, "of course")
-    .replace(/\bsuper excited\b/gi, "happy")
-    .replace(/\bHi there[!,]?\s*/gi, "hey ")
-    .replace(/\bWhat type of cake are you looking for\b/gi, "what cake are you after")
-    .replace(/\byour event\b/gi, "you need it for")
-    .toLowerCase()
-    .trim();
 }
 
 function extractReferenceLinks(message: string): string[] {
@@ -488,34 +372,4 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isImageDataUrl(value: unknown): value is string {
   return typeof value === "string" && /^data:image\/(png|jpe?g|webp);base64,/i.test(value);
-}
-
-function getDirectReply(
-  message: string,
-  intent: ReturnType<typeof detectCustomerIntent>["intent"],
-  session: DemoSession,
-): BotDecision | null {
-  if (intent === "menu_question") {
-    const menuReply = buildMenuReply(message);
-
-    if (menuReply) {
-      return {
-        nextState: session.state,
-        action: "ask_follow_up",
-        replyToCustomer: menuReply,
-        shouldEmailBaker: false,
-      };
-    }
-  }
-
-  if (intent === "greeting" || intent === "thanks" || intent === "order_status") {
-    return decideFlowReply({
-      intent,
-      lead: session.lead,
-      currentState: session.state,
-      customerMessage: message,
-    });
-  }
-
-  return null;
 }
